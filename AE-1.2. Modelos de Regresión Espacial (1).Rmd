@@ -1,0 +1,224 @@
+---
+title: "AE-1.2. Modelos de Regresión Espacial"
+author: "Paloma Quiroz A01620449 | Sandra Sotelo A01625347 | Adriana Delgado A01246093 | Lizbeth Martínez A01383976"
+date: "2023-04-17"
+output: html_document
+---
+
+`Librerías`
+
+```{r message=FALSE, warning=FALSE}
+library(tidyverse)
+library(spdep)
+library(spatialreg)
+library(rgdal)
+library(rgeos)
+library(sqldf)
+library(maptools)
+library(Metrics)
+library(caret)
+library(xgboost)
+```
+
+`Preparación de los datos`
+
+```{r}
+hospitales <- read.csv('/Users/lizbeth.m.a/Downloads/spda_covid19/denue_hospitales.csv')
+#hospitales
+```
+
+```{r}
+confirmados <- read.csv('/Users/lizbeth.m.a/Downloads/spda_covid19/covid19_confirmados.csv')
+#confirmados
+```
+
+```{r warning=FALSE}
+mapaShape <- readShapePoly("/Users/lizbeth.m.a/Downloads/spda_covid19/shp_mx_mpios/mx_mpios.shp",IDvar="IDUNICO", proj4string = CRS("+proj=longlat"))
+
+mapasf <- read_sf("/Users/lizbeth.m.a/Downloads/spda_covid19/shp_mx_mpios/mx_mpios.shp")
+```
+
+```{r}
+tipos <- unique(hospitales$nombre_act)
+categorias <- read.csv("/Users/lizbeth.m.a/Downloads/tipos.csv")
+categorias
+```
+
+```{r}
+instituciones <- hospitales %>%
+  filter(nombre_act %in% categorias$Actividad)
+
+instituciones <- instituciones %>%
+  select(-clee, -raz_social, -codigo_act,-nom_vial,-tipo_v_e_1,-nom_v_e_1,-tipo_v_e_2,-tipo_v_e_3,-nom_v_e_2,-nom_v_e_3,-numero_ext,-letra_ext,-edificio,-numero_int,-letra_int,-edificio_e,-tipo_asent,-tipoCenCom,-num_local,-manzana,-telefono,-correoelec,-www,-tipoUniEco,-nomb_asent,-nom_CenCom,cod_postal)
+
+colnames(categorias)[1] = "nombre_act"
+
+instituciones <- left_join(instituciones, categorias, by="nombre_act")
+```
+
+```{r}
+instituciones$cve_mun <- sprintf("%003d", instituciones$cve_mun)
+instituciones$cve_mun <- paste0(instituciones$cve_ent, instituciones$cve_mun)
+```
+
+```{r}
+regiones <- read.csv("/Users/lizbeth.m.a/Downloads/Regiones.csv")
+instituciones <- left_join(instituciones, regiones, by="entidad")
+```
+
+```{r}
+hosp_mun <- instituciones%>%
+  group_by(cve_mun)%>%
+  count(cve_mun)%>%
+  arrange(desc(n))
+names(hosp_mun) <- c('IDUNICO',"No_hospitales")
+hosp_mun
+```
+
+```{r}
+hosp_mun <- sqldf('select a.*, b.entidad, b.region          
+            from hosp_mun as a
+            left outer join
+            instituciones as b
+            on a.IDUNICO=b.cve_mun')
+hosp_mun <- hosp_mun[!duplicated(hosp_mun), ]
+```
+
+```{r}
+confirmados$total_confirmados <- (rowSums(confirmados[ , c(19:29)], na.rm=TRUE)+ 
+                                    rowSums(confirmados[ , c(31:42)], na.rm=TRUE)/2)
+```
+
+```{r}
+colnames(confirmados)[1] ="IDUNICO"
+confirmados$IDUNICO <- as.character(confirmados$IDUNICO)
+confirmados <- left_join(confirmados, hosp_mun, by = "IDUNICO")
+```
+
+```{r}
+confirmados$densidad <- (confirmados$poblacion_2022/confirmados$No_hospitales)
+```
+
+```{r}
+confirmados$IDUNICO <- as.integer(confirmados$IDUNICO)
+confirmados <- left_join(mapasf, confirmados, by = "IDUNICO")
+```
+
+```{r include=FALSE}
+confirmados$hogrem2015 <- (as.numeric(confirmados$hogrem2015))/100 
+confirmados$hogremjefmuj2015 <- (as.numeric(confirmados$hogremjefmuj2015))/100 
+confirmados$popnoafmed2015 <- (as.numeric(confirmados$popnoafmed2015))/100 
+confirmados$gini2015 <- as.numeric(confirmados$gini2015)
+confirmados$popden2020 <- as.numeric(confirmados$popden2020) 
+confirmados$inclusion_fin_2019 <- confirmados$inclusion_fin_2019/100
+confirmados$porcentaje_pob_pobreza <- (as.numeric(confirmados$porcentaje_pob_pobreza))/100 
+confirmados$porcentaje_pob_pobreza_ext <- (as.numeric(confirmados$porcentaje_pob_pobreza_ext))/100 
+confirmados$porcentaje_pob_servicios_salud <- (as.numeric(confirmados$porcentaje_pob_servicios_salud))/100 
+confirmados$porcentaje_pob_acceso_ss <- (as.numeric(confirmados$porcentaje_pob_acceso_ss))/100
+confirmados$pob_6.14_no_edu <- confirmados$pob_6.14_no_edu/100
+confirmados
+```
+
+```{r message=FALSE, warning=FALSE}
+confirmados$tasa_confirmados <- confirmados$total_confirmados/confirmados$poblacion_2022*10000
+```
+
+# ¿Cómo se relaciona el análisis espacial de datos con la inteligencia de ubicación?
+
+La inteligencia de ubicación hace uso del análisis espacial de los datos, el cual mide la fuerza y dirección de las relaciones entre una variable espacial dependiente y variables espaciales independientes, y los combina con datos comerciales y de visualización de mapas para visualizar patrones, tendencias y relaciones espaciables para la planificación y optimización de procesos.
+
+# Modelo de regresión no espacial
+
+```{r}
+set.seed(123)
+
+library(caret)
+sample <- sample(c(TRUE, FALSE), nrow(confirmados), replace=TRUE, prob=c(0.7,0.3))
+train  <- confirmados[sample, ]
+test   <- confirmados[!sample,]
+
+modelo <- lm(tasa_confirmados ~ log(No_hospitales) + porcentaje_pob_acceso_ss + porcentaje_pob_pobreza + inclusion_fin_2019 + log(gini2015) + hogrem2015, data = train)
+summary(modelo)
+```
+
+# De acuerdo al ESDA de la Actividad se porqué si / no se justifica el análisis de regresión espacial?
+
+# Modelos de regresión espacial
+
+```{r message=FALSE, warning=FALSE}
+confirmados.tr<-as(confirmados, "Spatial")
+confirmados_nb<-poly2nb(confirmados.tr)
+confirmados.listw <- nb2listw(confirmados_nb) 
+```
+
+## Modelo SLX
+
+```{r message=FALSE, warning=FALSE}
+modelo_SLX <- lmSLX(tasa_confirmados ~ gini2015 + inclusion_fin_2019 + porcentaje_pob_pobreza + porcentaje_pob_servicios_salud + rezago_social + No_hospitales, data = confirmados, confirmados.listw)
+summary(modelo_SLX)
+```
+
+## Spatial Autoregressive Model
+
+```{r message=FALSE, warning=FALSE}
+confirmados.tr<-as(confirmados, "Spatial")
+confirmados_nb<-poly2nb(confirmados.tr)
+confirmados.listw<-nb2listw(confirmados_nb, style="W") 
+spatial_lag_model <- lagsarlm(tasa_confirmados ~ No_hospitales + porcentaje_pob_acceso_ss + porcentaje_pob_pobreza + inclusion_fin_2019 + gini2015 + hogrem2015, data= confirmados, confirmados.listw, method="Matrix")
+summary(spatial_lag_model)
+```
+
+## Spatial Error Model
+
+```{r message=FALSE, warning=FALSE}
+spatial_error_model <- errorsarlm(tasa_confirmados ~ No_hospitales + porcentaje_pob_acceso_ss + porcentaje_pob_pobreza + inclusion_fin_2019 + gini2015 + hogrem2015, data=confirmados, confirmados.listw, method="Matrix")
+summary(spatial_error_model)
+```
+
+# Modelo de regresión con machine learning
+
+```{r}
+prediction_lm_model <- modelo %>% 
+  predict(test)
+summary(prediction_lm_model)
+```
+
+```{r}
+library(rpart)
+library(Metrics)
+decision_tree_regression <- rpart(tasa_confirmados ~ log(No_hospitales) + porcentaje_pob_acceso_ss + porcentaje_pob_pobreza + inclusion_fin_2019 + log(gini2015) + hogrem2015, data = train)
+
+plot(decision_tree_regression, compress = TRUE)
+text(decision_tree_regression, use.n = TRUE)
+
+#rpart.plot(decision_tree_regression)
+
+prediction <- predict(decision_tree_regression,test)
+```
+
+# RMSE
+
+Tomando en cuenta el RMSE de cada modelo, seleccionamos los modelos Spatial Error Model y Decision Tree Regression siendo que los valores más bajos, indicando un mejor ajuste.
+
+```{r message=FALSE, warning=FALSE}
+sqrt(mean((confirmados$tasa_confirmados - modelo$fitted.values)^2))
+sqrt(mean((confirmados$tasa_confirmados - modelo_SLX$fitted.values)^2))
+sqrt(mean((confirmados$tasa_confirmados - spatial_lag_model$fitted.values)^2))
+sqrt(mean((confirmados$tasa_confirmados - spatial_error_model$fitted.values)^2))
+rmse(prediction, test$tasa_confirmados)
+```
+
+# Con base en la situación problema, describir los principales 5-7 hallazgos del análisis de regresión.
+
+- La variable que tiene más significancia es la del porcentaje de la población con acceso a seguridad social, a mayor acceso seguridad social, menor tasa de confirmados.
+- A mayor porcentaje de pobreza, menor tasa de confirmados.
+- El número de hospitales tiene un impacto positivo en la tasa de confirmados, lo cual nos hace inferir que se puede deber a que se realizaron más pruebas que en municipios donde existen menos hospitales.
+- La inclusión de personas con acceso a banca comercial tiene un efecto positivo en la tasa de casos de COVID.
+- El modelo que más se ajusta a los datos es el modelo de árboles de decisión debido a que tiene un rmse más bajo, lo que nos hace concluir que no es muy recomendable el uso de modelos que tomen en cuenta la distribución espacial de los datos, por el contrario, disminuye su asertividad.
+- Si se trata de considerar la espacialidad, consideramos que el modelo espacial que más se ajusta es el modelo de error espacial.
+
+# A partir de los modelos de regresión seleccionados y los hallazgos identificados describir 2-3 sugerencias relacionadas con la toma de decisiones para el crecimiento / expansión territorial de organizaciones orientadas a las prestación de servicios de salud
+
+1. Los servicios de seguridad social deben ser garantizados en cantidad y calidad a la población más vulnerable a las enfermedades como el COVID19, ya que este tipo de servicios pueden prevenir el aumento de casos, en este caso, la población más vulnerable es aquella que vive zonas con mayor pobreza o rezago social pero en zonas aglomeradas.
+
+2. Entre mayor es el coeficiente de desigualdad del ingreso mayor es la tasa de confirmados de COVID19, lo mismo pasa con el número de hospitales por municipio, lo que nos hace inferir también que, aunque los municipios con más hospitales superen en cantidad a otros, tal vez la oferta no está cubriendo la demanda o estos se concentran en ciertas zonas con mayor ingreso económico, por lo que los servicios de seguridad social accesibles deberían priorizarse en las zonas con mayor rezago social.
