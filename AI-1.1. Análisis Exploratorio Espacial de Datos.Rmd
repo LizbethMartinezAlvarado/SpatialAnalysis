@@ -1,0 +1,526 @@
+---
+title: "A1.1. Análisis Exploratorio Espacial de Datos"
+author: "Lizbeth Martínez Alvarado"
+date: "2023-04-17"
+output: html_document
+---
+
+## ¿Qué es un ESDA y cuál es su principal propósito en el proceso de analítica de datos?
+
+El Análisis Exploratorio de Datos Espaciales (ESDA, por sus siglas en inglés) se centra en encontrar relaciones entre variables y su ubicación en un espacio de lugares vecinos. Es una técnica de análisis de datos que se utiliza para identificar patrones espaciales y relaciones entre variables que están ubicadas en un espacio geográfico determinado. El ESDA tiene como objetivo encontrar relaciones entre variables y sus ubicaciones en un espacio de lugares vecinos, lo que implica considerar los valores de las variables en un área geográfica determinada y la presencia o ausencia de variaciones espaciales en dichas variables. 
+
+El ESDA es especialmente relevante en el análisis de datos geográficos, ya que los métodos de análisis convencionales no suelen explorar los patrones espaciales de los datos ni explican si el comportamiento de los mismos es aleatorio o si la ubicación es un factor importante.
+
+## Concepto de autocorrelación espacial y ejemplos
+
+Lo anterior se traduce en un método llamado Autocorrelación Espacial, que, así como la Autocorrelación Serial explica la relación entre los valores de una variable consigo misma, pero de periodos anteriores, esta explica la relación entre los valores de una variable dada su localización y sus vecinos.
+
+La Autocorrelación Espacial nos dice si hay presencia o ausencia de variaciones espaciales para cada variable analizada; una autocorrelación positiva indica que las áreas cercanas comparten valores similares (valores bajos cerca de valores bajos, y altos cerca de altos), mientras que una autocorrelación negativa indica que las áreas vecinas tienen un comportamiento diferente (valores bajos cerca de valores altos).
+
+Este tipo de análisis se puede aplicar en los bienes raíces para evaluar el comportamiento de los precios de las viviendas en cierto estado o cierta ciudad, dependiendo del detalle de la información con la que se cuenta, también, este análisis se puede aplicar para conocer el comportamiento de las ventas de una cadena de tiendas de conveniencia de acuerdo a su localización, o, como desarrollaremos en este ejercicio, se pueden explorar los factores que más influyen en el comportamiento de contagios de una enfermedad dado el espacio y lugares geográficos.
+
+## Limpieza y diseño de base de datos "denue_hospitales" e integración con "covid19_confirmados"
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+# Cargamos las librerías necesarias
+library(foreign)
+library(ggplot2)
+library(spdep)
+library(spmoran)
+library(spatialreg)
+library(mapproj)
+library(sp)
+library(maps)
+library(rgeos)
+library(ggmap)
+library(mapproj)
+library(RColorBrewer)
+library(rgdal)
+library(scales)
+library(ggsn)
+library(sf)
+library(maptools)
+library(dplyr)
+library(sqldf)
+library(regclass)
+library(mctest)
+library(lmtest)
+library(spData)
+library(mapview)
+library(naniar)
+library(dlookr)
+library(caret)
+library(e1071)
+library(SparseM)
+library(Metrics)
+library(randomForest)
+library(rpart.plot)
+library(knitr)
+library(insight)
+library(rgeoda)
+library(rgeos)
+library(jtools)
+library(GGally)
+```
+
+```{r}
+hospitales <- read.csv('/Users/lizbeth.m.a/Downloads/spda_covid19/denue_hospitales.csv')
+hospitales
+```
+
+```{r}
+confirmados <- read.csv('/Users/lizbeth.m.a/Downloads/spda_covid19/covid19_confirmados.csv')
+confirmados
+```
+
+```{r warning=FALSE}
+mapaShape <- readShapePoly("/Users/lizbeth.m.a/Downloads/spda_covid19/shp_mx_mpios/mx_mpios.shp",IDvar="IDUNICO", proj4string = CRS("+proj=longlat"))
+
+mapasf <- read_sf("/Users/lizbeth.m.a/Downloads/spda_covid19/shp_mx_mpios/mx_mpios.shp")
+```
+
+```{r}
+tipos <- unique(hospitales$nombre_act)
+categorias <- read.csv("/Users/lizbeth.m.a/Downloads/tipos.csv")
+categorias
+```
+
+```{r}
+instituciones <- hospitales %>%
+  filter(nombre_act %in% categorias$Actividad)
+
+instituciones <- instituciones %>%
+  select(-clee, -raz_social, -codigo_act,-nom_vial,-tipo_v_e_1,-nom_v_e_1,-tipo_v_e_2,-tipo_v_e_3,-nom_v_e_2,-nom_v_e_3,-numero_ext,-letra_ext,-edificio,-numero_int,-letra_int,-edificio_e,-tipo_asent,-tipoCenCom,-num_local,-manzana,-telefono,-correoelec,-www,-tipoUniEco,-nomb_asent,-nom_CenCom,cod_postal)
+
+colnames(categorias)[1] = "nombre_act"
+
+instituciones <- left_join(instituciones, categorias, by="nombre_act")
+```
+
+```{r}
+instituciones$cve_mun <- sprintf("%003d", instituciones$cve_mun)
+instituciones$cve_mun <- paste0(instituciones$cve_ent, instituciones$cve_mun)
+```
+
+```{r}
+regiones <- read.csv("/Users/lizbeth.m.a/Downloads/Regiones.csv")
+instituciones <- left_join(instituciones, regiones, by="entidad")
+```
+
+```{r}
+hosp_mun <- instituciones%>%
+  group_by(cve_mun)%>%
+  count(cve_mun)%>%
+  arrange(desc(n))
+names(hosp_mun) <- c('IDUNICO',"No_hospitales")
+hosp_mun
+```
+
+```{r}
+hosp_mun <- sqldf('select a.*, b.entidad, b.region          
+            from hosp_mun as a
+            left outer join
+            instituciones as b
+            on a.IDUNICO=b.cve_mun')
+hosp_mun <- hosp_mun[!duplicated(hosp_mun), ]
+```
+
+```{r}
+confirmados$total_confirmados <- (rowSums(confirmados[ , c(19:29)], na.rm=TRUE)+ 
+                                    rowSums(confirmados[ , c(31:42)], na.rm=TRUE)/2)
+```
+
+```{r}
+colnames(confirmados)[1] ="IDUNICO"
+confirmados$IDUNICO <- as.character(confirmados$IDUNICO)
+confirmados <- left_join(confirmados, hosp_mun, by = "IDUNICO")
+```
+
+```{r}
+confirmados$densidad <- (confirmados$poblacion_2022/confirmados$No_hospitales)
+```
+
+```{r}
+confirmados$IDUNICO <- as.integer(confirmados$IDUNICO)
+confirmados <- left_join(mapasf, confirmados, by = "IDUNICO")
+```
+
+```{r}
+confirmados$tasa_confirmados <- confirmados$total_confirmados/confirmados$poblacion_2022*10000
+```
+
+## México
+
+#### Variables de interés
+
+De acuerdo al modelo de regresión lineal que se muestra a continuación, se eligieron las siguientes variables de acuerdo a su significancia:
+
+- gini2015: coeficiente de desigualdad del ingreso.
+- inclusion_fin_2019: porcentaje de la población que tiene acceso a servicios de banca comercial durante el año de 2019.
+- porcentaje_pob_pobreza: porcentaje de la población en situación de pobreza durante el año 2020.
+- porcentaje_pob_servicios_salud: porcentaje de la población que carece a servicios de salud durante el año 2020.
+- rezago_social: indicador de rezago social.
+- No_hospitales: Número de hospitales por municipio.
+
+```{r}
+#confirmados %>% str()
+```
+
+```{r}
+confirmados$gini2015 = as.numeric(as.character(confirmados$gini2015))
+confirmados$porcentaje_pob_pobreza = as.numeric(as.character(confirmados$porcentaje_pob_pobreza))
+confirmados$porcentaje_pob_servicios_salud = as.numeric(as.character(confirmados$porcentaje_pob_servicios_salud))
+```
+
+```{r}
+modelo <- lm(tasa_confirmados ~ gini2015 + inclusion_fin_2019 + porcentaje_pob_pobreza + porcentaje_pob_servicios_salud + rezago_social + No_hospitales, data = confirmados)
+summary(modelo)
+```
+
+Podemos destacar que nuestro modelo es estadisticamente significativo y según la R2 ajustada, el 40% de la variación en la tasa de confirmados es explicada por el comportamiento de nuestras variables predictoras.
+
+En cuanto a la interpretación de los resultados en el contexto estudiado:
+
+- El intercepto es de 98.53, lo que significa que cuando todas las variables explicativas son iguales a cero, la tasa de confirmados por cada 10,000 habitantes es de aproximadamente 98.
+
+- El coeficiente para gini2015 es de 197.8, lo que indica que un aumento de una unidad en el índice Gini (medida de la desigualdad económica de 2015) se asocia con un aumento de 197.8 en la tasa de confirmados.
+
+- El coeficiente para inclusion_fin_2019 es de 2209, lo que significa que un aumento de una unidad en el índice de inclusión financiera de 2019 (medida del acceso a los servicios financieros) está asociado con un aumento de 2209 en la tasa de confirmados.
+
+- El coeficiente de porcentaje_pob_pobreza es -138.7. Esto significa que un aumento de una unidad en el porcentaje de la población que vive en pobreza se asocia con una disminución de 138.7 en la tasa de confirmados.
+
+- El coeficiente para porcentaje_pob_acceso_ss es de -68.23, lo que significa que un aumento de una unidad en el porcentaje de la población con acceso a servicios de salud está asociado con una disminución de -68.23 en la tasa de confirmados.
+
+- El coeficiente de rezago_social es -15.63. Indicando que un aumento de una unidad en el índice de rezago social se asocia con una disminución de 15.63 en la tasa de confirmados.
+
+- El coeficiente de No_hospitales es 0.0737. Esto significa que un aumento de una unidad en el número de hospitales se asocia con un aumento de 0.0737 en la tasa de confirmados.
+
+Ahora, conservaremos solo esas variables para hacer el análisis.
+
+```{r}
+confirmados_var  <- confirmados %>%
+  select(CODELAG, CVE_ENT, IDUNICO, geometry, mpio, entidad, gini2015, inclusion_fin_2019, porcentaje_pob_pobreza, porcentaje_pob_servicios_salud, rezago_social, No_hospitales, tasa_confirmados)
+confirmados_var
+```
+
+#### Análisis Exploratorio de Datos Espaciales
+
+###### Análisis de normalidad
+
+```{r}
+plot_normality(confirmados, poblacion_2022, gini2015, inclusion_fin_2019, porcentaje_pob_pobreza, porcentaje_pob_servicios_salud, rezago_social, No_hospitales)
+```
+
+Las variables poblacion_2022, gini2015 e inclusion_fin_2019 presentan una distribución normal con una transformación log, mientras que en el resto de variables persiste una distribución no normal aún después de la transformación.
+
+###### Estadísticos de Dispersión
+
+```{r}
+confirmados$region <- as.factor(confirmados$region)
+target_var <- target_by(confirmados, total_confirmados)
+relationship <- relate(target_var,region)
+plot(relationship)
+```
+
+Como podemos observar, la región Centro Norte es donde más se concetran las cifras extremas de número de confirmados totales (promedio de 2020 y 2021), llegando hasta los 100,000 confirmados; el resto de regiones tiene un comportamiento similar, más bajo que Centro Norte.
+
+```{r}
+target_var <- target_by(confirmados, tasa_confirmados)
+relationship <- relate(target_var,region)
+plot(relationship)
+```
+
+Y como era de esperarse, la región Centro Norte es donde más se concetran las cifras extremas de la densidad de confirmados por cada 10,000 habitantes, casi llegango a los 1,200 habitantes.
+
+###### Distribución espacial
+
+Creamos el mapa del país:
+
+```{r}
+lmat_c <- coordinates(mapaShape)
+map.centroid_c <-coordinates(mapaShape)
+
+mapa_template <- ggplot(data = confirmados) + geom_sf()
+mapa_template
+```
+
+```{r}
+confirmados.tr<-as(confirmados, "Spatial")
+confirmados_nb<-poly2nb(confirmados.tr)
+#mapview(confirmados.tr, zcol="total_confirmados")
+```
+
+En el siguiente mapa podemos observar que la mayoria de los municipios del país tiene un comportamiento similar en cuanto al porcentaje de la población que tiene acceso a servicios de banca comercial (2019), no se ven datos extremos, la mayoría se concentra entre un 1% y 4%:
+
+```{r}
+mapaconfirmados_inclusion <- ggplot(data= confirmados_var) + geom_sf(aes(fill=inclusion_fin_2019)) + 
+  scale_fill_continuous(low = "#E2FBFF", high = "#0073C2FF") + 
+  ggtitle(label = "Población con acceso a banca comercial", subtitle = "2019")
+mapaconfirmados_inclusion
+```
+
+En el siguiente mapa podemos observar ya algunos valores extremos superiores dentro de la escala en el norte y oeste del país, con valores cercanos a 0.6 en cuanto al Coeficiente de desigualdad del ingreso:
+
+```{r}
+mapaconfirmados_gini <- ggplot(data= confirmados_var) + geom_sf(aes(fill=gini2015)) + 
+  scale_fill_continuous(low = "#fff7ec", high = "#7F0000") + 
+  ggtitle(label = "Coeficiente de desigualdad del ingreso")
+mapaconfirmados_gini
+```
+
+En el siguiente mapa podemos ver que la gran mayoría de municipios parecen tener menos de 1000 hospitales o clínicas de salud, solo en algunos municipios del norte y centro se alcanzan cifras entre 2000 y 4000:
+
+```{r}
+mapaconfirmados_hospitales <- ggplot(data= confirmados_var) + geom_sf(aes(fill=No_hospitales)) + 
+  scale_fill_continuous(low = "#E2FBFF", high = "#0073C2FF") + 
+  ggtitle(label = "Número de hospitales")
+mapaconfirmados_hospitales
+```
+
+En el siguiente mapa podemos ver que muchos municipios del oeste y sur del país se tienen un porcentaje alto (75% o más) de población en situación de pobreza:
+
+```{r}
+mapaconfirmados_pobreza <- ggplot(data= confirmados_var) + geom_sf(aes(fill=porcentaje_pob_pobreza)) + 
+  scale_fill_continuous(low = "#fff7ec", high = "#7F0000") + 
+  ggtitle(label = "Población en situación de pobreza", subtitle = "2020")
+mapaconfirmados_pobreza
+```
+
+En el siguiente mapa podemos observar que la mayoria de los municipios del país tiene un comportamiento similar en cuanto al población que carece a servicios de salud, no se ven datos extremos, la mayoría se concentra entre un 20% y 40%:
+
+```{r}
+mapaconfirmados_ssalud <- ggplot(data= confirmados_var) + geom_sf(aes(fill=porcentaje_pob_servicios_salud)) + 
+  scale_fill_continuous(low = "#fff7ec", high = "#7F0000") + 
+  ggtitle(label = "Población que carece a servicios de salud", subtitle = "2020")
+mapaconfirmados_ssalud
+```
+
+En el siguiente mapa podemos ver que la gran mayoría de municipios parecen tener un índice cercano a cero de rezago social, solo en algunos municipios del oeste del país se alcanza un índice cercano o mayor a 6:
+
+```{r}
+mapaconfirmados_rezago <- ggplot(data= confirmados_var) + geom_sf(aes(fill=rezago_social)) + 
+  scale_fill_continuous(low = "#fff7ec", high = "#7F0000") + 
+  ggtitle(label = "Indicador de rezago social")
+mapaconfirmados_rezago
+```
+
+###### Matriz de conectividad
+
+A continuación se visualiza la estructura espacial de nuestros datos:
+
+```{r}
+confirmados_map_sf<-(confirmados)
+confirmados_w<-queen_weights(confirmados_map_sf)
+
+# spatial connectivity matrix 
+confirmados_map_centroid<-coordinates(confirmados.tr) 
+confirmados_map.linkW<-nb2listw(confirmados_nb, style="W")   
+plot(confirmados.tr,border="blue",axes=FALSE,las=1, main="Spatial Connectivity Matrix")
+plot(confirmados.tr,col="grey",border=grey(0.9),axes=T,add=T) 
+plot(confirmados_map.linkW,coords=confirmados_map_centroid,pch=19,cex=0.1,col="red",add=T)  
+```
+
+###### Autocorrelación espacial
+
+```{r}
+moran.mc(confirmados$tasa_confirmados, confirmados_map.linkW,nsim=9999)
+```
+
+La tasa de confirmados presenta autocorrelación espacial positiva (valores bajos cerca de valores bajos, y altos cerca de altos).
+
+```{r}
+moran.mc(confirmados$gini2015, confirmados_map.linkW,nsim=9999)
+moran.mc(confirmados$inclusion_fin_2019, confirmados_map.linkW,nsim=9999)
+moran.mc(na.omit(confirmados$porcentaje_pob_pobreza), confirmados_map.linkW,nsim=9999)
+moran.mc(na.omit(confirmados$porcentaje_pob_servicios_salud), confirmados_map.linkW,nsim=9999)
+moran.mc(confirmados$rezago_social, confirmados_map.linkW,nsim=9999)
+moran.mc(na.omit(confirmados$No_hospitales), confirmados_map.linkW,nsim=9999)
+```
+
+El coeficiente de desigualdad del ingreso presenta autocorrelación espacial positiva (valores bajos cerca de valores bajos, y altos cerca de altos).
+
+El porcentaje de la población que tiene acceso a servicios de banca comercial durante el año de 2019 presenta autocorrelación espacial positiva (valores bajos cerca de valores bajos, y altos cerca de altos).
+
+El porcentaje de la población en situación de pobreza durante el año 2020 presenta autocorrelación espacial positiva (valores bajos cerca de valores bajos, y altos cerca de altos).
+
+El porcentaje de la población que carece a servicios de salud durante el año 2020 presenta autocorrelación espacial positiva (valores bajos cerca de valores bajos, y altos cerca de altos).
+
+El indicador de rezago social presenta autocorrelación espacial positiva (valores bajos cerca de valores bajos, y altos cerca de altos).
+
+El número de hospitales por municipio presenta autocorrelación espacial positiva (valores bajos cerca de valores bajos, y altos cerca de altos).
+
+###### Clusters
+
+```{r}
+lisa_MEDV<-local_moran(confirmados_w, confirmados_map_sf["total_confirmados"]) 
+confirmados_map_sf$cluster_MEDV<-as.factor(lisa_MEDV$GetClusterIndicators())
+levels(confirmados_map_sf$cluster_MEDV)<-lisa_MEDV$GetLabels() #
+
+mapview(confirmados_map_sf, zcol="cluster_MEDV")
+```
+
+## Sur de México
+
+```{r}
+confirmados_sur <- filter(confirmados, region == "Sur")
+confirmados_sur
+```
+
+#### Variables de interés
+
+De acuerdo a la significancia encontrada con modelo de regresión lineal que se muestra a continuación, se eligieron las siguientes variables:
+
+- gini2015: coeficiente de desigualdad del ingreso.
+- inclusion_fin_2019: porcentaje de la población que tiene acceso a servicios de banca comercial durante el año de 2019.
+- porcentaje_pob_pobreza: porcentaje de la población en situación de pobreza durante el año 2020.
+- porcentaje_pob_servicios_salud: porcentaje de la población que carece a servicios de salud durante el año 2020.
+- rezago_social: indicador de rezago social.
+- No_hospitales: Número de hospitales por municipio.
+
+```{r}
+modelor <- lm(tasa_confirmados ~ gini2015 + inclusion_fin_2019 + porcentaje_pob_pobreza + porcentaje_pob_servicios_salud + rezago_social + No_hospitales, data = confirmados_sur)
+summary(modelor)
+```
+
+```{r}
+confirmados_sur_var  <- confirmados_sur %>%
+  select(CODELAG, CVE_ENT, IDUNICO, geometry, mpio, entidad, gini2015, inclusion_fin_2019, porcentaje_pob_pobreza, porcentaje_pob_servicios_salud, rezago_social, No_hospitales, tasa_confirmados)
+confirmados_sur_var
+```
+
+###### Estadísticos de Dispersión
+
+```{r}
+confirmados_sur$entidad <- as.factor(confirmados_sur$entidad)
+target_sur_var <- target_by(confirmados_sur, total_confirmados)
+relationship_sur <- relate(target_sur_var,entidad)
+plot(relationship_sur)
+```
+
+Como podemos observar, el estado de Tabasco y Yucatán es donde más se concetran las cifras extremas de número de confirmados totales (promedio de 2020 y 2021), llegando a superar los 30,000 confirmados; el resto de estados tienen cifras menores a 20,000.
+
+```{r}
+target_sur_var <- target_by(confirmados_sur, tasa_confirmados)
+relationship_sur <- relate(target_sur_var,entidad)
+plot(relationship_sur)
+```
+
+Y como era de esperarse, el estado Tabasco y Oaxaca es donde más se concetran las cifras extremas de la densidad de confirmados por cada 10,000 habitantes, casi llegando casi a los 600 habitantes.
+
+###### Distribución espacial
+
+Creación del template del sur de México
+
+```{r}
+mapaconfirmados_sur_inclusion <- ggplot(data= confirmados_sur_var) + geom_sf(aes(fill=inclusion_fin_2019)) + 
+  scale_fill_continuous(low = "#E2FBFF", high = "#0073C2FF") + 
+  ggtitle(label = "Población con acceso a banca comercial", subtitle = "2019")
+mapaconfirmados_sur_inclusion
+```
+
+```{r}
+mapaconfirmados_sur_gini <- ggplot(data= confirmados_sur_var) + geom_sf(aes(fill=gini2015)) + 
+  scale_fill_continuous(low = "#fff7ec", high = "#7F0000") + 
+  ggtitle(label = "Coeficiente de desigualdad del ingreso")
+mapaconfirmados_sur_gini
+```
+
+```{r}
+mapaconfirmados_sur_hospitales <- ggplot(data= confirmados_sur_var) + geom_sf(aes(fill=No_hospitales)) + 
+  scale_fill_continuous(low = "#E2FBFF", high = "#0073C2FF") + 
+  ggtitle(label = "Número de hospitales")
+mapaconfirmados_sur_hospitales
+```
+
+```{r}
+mapaconfirmados_sur_pobreza <- ggplot(data= confirmados_sur_var) + geom_sf(aes(fill=porcentaje_pob_pobreza)) + 
+  scale_fill_continuous(low = "#fff7ec", high = "#7F0000") + 
+  ggtitle(label = "Población en situación de pobreza", subtitle = "2020")
+mapaconfirmados_sur_pobreza
+```
+
+```{r}
+mapaconfirmados_sur_ssalud <- ggplot(data= confirmados_sur_var) + geom_sf(aes(fill=porcentaje_pob_servicios_salud)) + 
+  scale_fill_continuous(low = "#fff7ec", high = "#7F0000") + 
+  ggtitle(label = "Población que carece a servicios de salud", subtitle = "2020")
+mapaconfirmados_sur_ssalud
+```
+
+```{r}
+mapaconfirmados_sur_rezago <- ggplot(data= confirmados_sur_var) + geom_sf(aes(fill=rezago_social)) + 
+  scale_fill_continuous(low = "#fff7ec", high = "#7F0000") + 
+  ggtitle(label = "Indicador de rezago social")
+mapaconfirmados_sur_rezago
+```
+
+###### Matriz de conectividad
+
+```{r}
+confirmados_sur.tr<-as(confirmados_sur, "Spatial")
+confirmados_sur_nb<-poly2nb(confirmados_sur.tr)
+
+confirmados_sur_map_sf<-(confirmados_sur)
+confirmados_sur_w<-queen_weights(confirmados_sur_map_sf)
+
+# spatial connectivity matrix 
+confirmados_sur_map_centroid<-coordinates(confirmados_sur.tr) 
+confirmados_sur_map.linkW<-nb2listw(confirmados_sur_nb, style="W")   
+plot(confirmados_sur.tr,border="blue",axes=FALSE,las=1, main="Spatial Connectivity Matrix")
+plot(confirmados_sur.tr,col="grey",border=grey(0.9),axes=T,add=T) 
+plot(confirmados_sur_map.linkW,coords=confirmados_sur_map_centroid,pch=19,cex=0.1,col="red",add=T)  
+```
+
+###### Autocorrelación espacial
+
+```{r}
+moran.mc(confirmados_sur$tasa_confirmados, confirmados_sur_map.linkW,nsim=9999)
+```
+
+La tasa de confirmados presenta autocorrelación espacial positiva (valores bajos cerca de valores bajos, y altos cerca de altos).
+
+```{r}
+moran.mc(confirmados_sur$gini2015, confirmados_sur_map.linkW,nsim=9999)
+moran.mc(confirmados_sur$inclusion_fin_2019, confirmados_sur_map.linkW,nsim=9999)
+moran.mc(na.omit(confirmados_sur$porcentaje_pob_pobreza), confirmados_sur_map.linkW,nsim=9999)
+moran.mc(na.omit(confirmados_sur$porcentaje_pob_servicios_salud), confirmados_sur_map.linkW,nsim=9999)
+moran.mc(confirmados_sur$rezago_social, confirmados_sur_map.linkW,nsim=9999)
+moran.mc(na.omit(confirmados_sur$No_hospitales), confirmados_sur_map.linkW,nsim=9999)
+```
+
+El coeficiente de desigualdad del ingreso presenta autocorrelación espacial positiva (valores bajos cerca de valores bajos, y altos cerca de altos).
+
+El porcentaje de la población que tiene acceso a servicios de banca comercial durante el año de 2019 presenta autocorrelación espacial positiva (valores bajos cerca de valores bajos, y altos cerca de altos).
+
+El porcentaje de la población en situación de pobreza durante el año 2020 presenta autocorrelación espacial positiva (valores bajos cerca de valores bajos, y altos cerca de altos).
+
+El porcentaje de la población que carece a servicios de salud durante el año 2020 presenta autocorrelación espacial positiva (valores bajos cerca de valores bajos, y altos cerca de altos).
+
+El indicador de rezago social presenta autocorrelación espacial positiva (valores bajos cerca de valores bajos, y altos cerca de altos).
+
+El número de hospitales por municipio presenta autocorrelación espacial positiva (valores bajos cerca de valores bajos, y altos cerca de altos).
+
+###### Clusters
+
+```{r}
+lisa_MEDV<-local_moran(confirmados_sur_w, confirmados_sur_map_sf["total_confirmados"]) 
+confirmados_sur_map_sf$cluster_MEDV<-as.factor(lisa_MEDV$GetClusterIndicators())
+levels(confirmados_sur_map_sf$cluster_MEDV)<-lisa_MEDV$GetLabels()
+
+mapview(confirmados_sur_map_sf, zcol="cluster_MEDV")
+```
+
+## Principales hallazgos
+
+1. La región Norte tiene mayor tasa de confirmados, sin embargo, la región Centro-Norte tiene mayor dispersión.
+2. En cuanto a la región Sur, la entidad con mayor tasa de confirmados es Tabasco, seguido de Yucatán y Oaxaca.
+3. Los casos confirmados de covid no tienen relación con la cantidad de crímenes en la región.
+4. Las regiones Centro-Sur son las que tienen mayor población en situación de pobreza.
+5. Las mismas variables son significativas independientemente de que sea todo México o solo la región Sur.
+6. La región Centro y Centro-Sur tienen más necesidad de tener un mayor número de hospitales, sin embargo, tienen menos capacidad económica para cubrir los gastos de un hospital privado.
+7. Todas las variables analizadas tienen una autocorrelación espacial positiva, es decir, todas presentan valores bajos cerca de valores bajos, y altos cerca de altos. Lo que indica que los datos no presentan un comportamiento aleatorio, está determinado por el comportamiento de sus vecinos.
+
+## Referencias
+
+S. Dall’erba. (2009). Exploratory Spatial Data Analysis. Science Direct. Recuperado 10 de abril de 2023, de https://www.sciencedirect.com/topics/earth-and-planetary-sciences/exploratory-spatial-data-analysis
+
+Hassan, A. (2022). What Is Exploratory Spatial Data Analysis (ESDA)? Bulit In. Recuperado 10 de abril de 2023, de https://builtin.com/data-science/exploratory-spatial-data-analysis-esda
