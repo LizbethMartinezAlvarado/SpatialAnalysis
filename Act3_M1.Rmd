@@ -1,0 +1,420 @@
+---
+title: "AE-1.3 Modelos de Regresión Espacial y Machine Learning" 
+author: "Paloma Quiroz A01620449 | Sandra Sotelo A01625347 | Adriana Delgado A01246093 | Lizbeth Martínez A01383976"
+date: "26/4/2023"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r message=FALSE, warning=FALSE}
+library(dplyr)
+library(magrittr)
+library(maptools)
+library(sf)
+library(tmap)
+library(spdep)
+library(rgdal)
+library(tidyverse)
+library(tigris)
+library(mapview)
+library(GWmodel)    
+library(regclass)
+library(viridis)
+library(grid)
+library(dlookr)
+library(tmap)
+```
+
+# Objetivo general
+
+A partir de diversas bases de datos relevantes sobre factores influyentes en los casos de COVID-19 a nivel municipal, este análisis busca identificar los factores más significativos en el aumento o disminución de la enfermedad. También se analizarán los clusters de casos confirmados y su relación espacial con la enfermedad. Además, se explorará la construcción de un modelo de regresión espacial para predecir la tasa de casos de COVID-19 por municipio en función de la ubicación y la cercanía a otros municipios.
+
+## Describir 3-5 diferencias entre la estimación de modelo de regresión global y la estimación del método de Geographic Weighted Regression (GWR).
+
+La regresión global (regresión lineal múltiple) asume que la relación entre la variable dependiente y las variables independientes es constante en todo el espacio, es decir, que los coeficientes de regresión son iguales para todas las observaciones.
+
+Por otro lado, la regresión GWR (Geographically Weighted Regression) es una técnica de modelización espacial que permite explorar la variación de las relaciones entre variables a lo largo del espacio. En este modelo, los coeficientes de regresión varían en función de la ubicación espacial de la observación, lo que la hace especialmente útil cuando se sospecha que la relación entre la variable dependiente y las variables independientes es espacialmente heterogénea. En caso contrario, una regresión global sería la mejor opción, ya que asume que todas las regiones tienen el mismo comportamiento.
+
+La principal diferencia entre la regresión global y la regresión GWR es que esta última tiene en cuenta la variabilidad espacial de los datos y permite explorar cómo la relación entre las variables cambia según la ubicación en el espacio. Mientras que la regresión global es útil para explorar la relación entre variables, no puede capturar la heterogeneidad espacial de los datos.
+
+En la regresión global se ajusta una línea de regresión para todo el conjunto de datos, mientras que en la regresión GWR se ajusta una superficie de respuesta localmente en cada ubicación. Esto se ve reflejado en los coeficientes: mientras la regresión global estima un conjunto de coeficientes fijos que se aplican a todo el conjunto de datos (Estimate), la regresión GWR estima un conjunto de coeficientes variables que se aplican solo a las observaciones en una vecindad local de cada ubicación (Min., 1st Qu., Median, 3rd Qu., Max., Global).
+
+Ahora bien, comenzaremos con la exploración de nuestros datos:
+
+```{r setwd}
+#Establecemos nuestro directorio de trabajo
+#getwd()
+#file.choose()
+setwd("C:/Users/hp/OneDrive - Instituto Tecnologico y de Estudios Superiores de Monterrey/TEC/Planeación Estratégica 8/M1")
+```
+
+```{r carga, echo=FALSE}
+# Cargamos nuestra base de datos limpia que resulto del analisis realizado en la parte 1 del análisis de casos de COVID-19.  
+df <- read.csv("confirmados_covid.csv") #Archivo exportado de la actividad 1
+#Nuestra base de datos contiene algunos valores nulos que nos dificultan el analisis y contrucción de modelos y matrices en pasos posteriores, ya que los datos faltantes representan solamente el 1% de los datos totales, por lo que eliminarlos no afecta a nuestros resultados.
+df <- drop_na(df)
+summary(df)
+```
+
+```{r warning=FALSE}
+#Leemos nuestra base con datos espaciales y la combinamos con nuestra base de datos de municipios.
+mx_shp <- readOGR(dsn = "shp_mx_mpios/mx_mpios.shp") ### geospatial data. It has 254 features meaning 254 polygons (counties).
+mx_geodata <- geo_join(mx_shp, df, 'IDUNICO', 'IDUNICO', how = 'inner') ### Combining geospatial and non-spatial data
+names(mx_geodata)
+```
+
+Después de cargar nuestra base de datos, hemos obtenido un mapa que muestra la tasa de confirmados por cada 10,000 habitantes, que utilizaremos como variable dependiente en la construcción de nuestros modelos predictivos. En general, la mayoría de los municipios en México tienen entre 0 y 400 casos confirmados por cada 10,000 habitantes. Sin embargo, hay algunos casos particulares donde la tasa de confirmados aumenta, principalmente en el centro del país, y, específicamente, en Ciudad de México, aunque debido al tamaño del mapa, es difícil identificar estos casos específicos. No obstante, se pueden distinguir zonas con un mayor número de casos. Loreto, Baja California Sur y Cuatro Ciénegas, Coahuila son las zonas con las tasas más altas en comparación al resto de municipios del país.
+
+```{r}
+### visualzing Tasa de confirmados por 10,000 habitantes
+qtm(mx_geodata, "tasa_confirmados_pob")
+mapview(mx_geodata, zcol = "tasa_confirmados_pob")
+```
+
+A continuación enfocamos el mapa para mostrar el comportamiento de los municipios de Ciudad de México con detalle respecto a la tasa de confirmados por cada 10,000 habitantes. Es evidente que la zona de Álvaro Obregón es la más grave, tal vez del país, pues acumula entre 1,100 y 1,200 confirmados de COVID-19 por cada 10,000 habitantes. Habrá que explorar las caracterísiticas de su población para saber si estas influyen en su comportamiento.
+
+```{r}
+mx_cdmx_geodata <- subset(mx_geodata, entidad == 'Ciudad de M<e9>xico')
+qtm(mx_cdmx_geodata, "tasa_confirmados_pob")
+mapview(mx_cdmx_geodata, zcol = "tasa_confirmados_pob")
+```
+
+## Especificar 2 matrices de conectividad considerando enfoque de contiguedad (queen / rook), vecino más próximo (k nearest neighbor – knn), y / o distancia
+
+La creación de una matriz de conectividad nos permitirá evaluar la conexión entre los diferentes municipios de nuestra base de datos. Se ha realizado una matriz de conectividad utilizando las técnicas de Queen y Rook para determinar cuál es la más adecuada para la construcción posterior de nuestro modelo. En general, la técnica de Queen considera conexiones cuando dos unidades comparten al menos un vértice, mientras que la técnica de Rook lo considera solo cuando las unidades comparten un lado completo.
+
+#### Matríz de conectividad usando Queen
+
+```{r}
+# Vamos a verificar que solo estemos utilizando los datos que se encuentran en nuestra base de datos de municipios
+IDSS <- mx_geodata$IDUNICO
+mx_shp <- subset(mx_shp, IDUNICO %in% IDSS)
+### modelling spatial negihbors and spatial connectivity matrices with Queen
+swm_queen <- poly2nb(mx_shp, queen = TRUE)
+summary(swm_queen)
+
+### summary of spatial weight matrix
+# There are 2437 area units / counties in Texas
+# Most connected area unit has 22 neighbours
+# Least connected areea unit has 1 neighbor 
+```
+
+Los resultados de la matriz de conectividad utilizando la técnica de Queen muestran que hay 2,437 regiones en nuestro conjunto de datos y 14,204 conexiones entre ellas, lo que indica una relación de contigüidad entre muchas de ellas. El 23.92% de las conexiones son "no nulas", lo que significa que hay una relación de contigüidad entre las regiones. En promedio, cada región está conectada a otras 5.83 regiones en el conjunto de datos.
+
+La distribución de conexiones muestra que hay una gran cantidad de regiones con pocas conexiones y relativamente pocas regiones con muchas conexiones. Se han identificado las ocho regiones con el menor número de conexiones, las cuales están aisladas de las demás regiones, cada una con una sola conexión. Por otro lado, la región 1173 tiene el mayor número de conexiones (22), lo que sugiere que está altamente conectada con muchas otras regiones en el conjunto de datos.
+
+En resumen, los resultados indican que hay una amplia variación en la conectividad, con algunas regiones altamente conectadas y otras aisladas. Esto puede tener implicaciones en el análisis espacial y la identificación de patrones geográficos en los datos, ya que las regiones aisladas pueden tener características distintas a las regiones altamente conectadas.
+
+En la parte inferior  se presenta una representación gráfica de esta matriz de conectividad.
+
+```{r warning=FALSE}
+### plotting queen contiguity based neighbors maps
+plot(mx_shp, borders = 'lightgrey') 
+plot(swm_queen, coordinates(mx_shp), pch = 19, cex = 0.6, add = TRUE, col = "red")
+title(main = "Queen Contiguity", cex.main = 0.9)
+```
+
+#### Matríz de conectividad usando Rook
+
+```{r}
+swm_rook <- poly2nb(mx_shp, queen = FALSE)
+summary(swm_rook)
+```
+
+La matriz de conectividad Rook muestra que hay 2,437 regiones en la base de datos y 13,992 conexiones entre ellas. El porcentaje de pesos no nulos es del 23.56%, lo que significa que hay una relación de contigüidad entre las regiones. En promedio, cada región está conectada a otras 5.74 regiones en el conjunto de datos.
+
+La distribución del número de conexiones muestra que hay ocho regiones con el menor número de conexiones, cada una con solo una conexión, lo que significa que están aisladas de las demás regiones. Las dos regiones más conectadas son la región 1058 y la región 1173, cada una con 21 conexiones.
+
+Estos resultados sugieren que hay una variación en la conectividad entre las regiones, con algunas regiones altamente conectadas y otras aisladas. Esta variación puede tener implicaciones en el análisis espacial y la identificación de patrones geográficos en los datos.
+
+En la parte inferior observamos la matriz de conectividad Rook de una manera gráfica.
+
+```{r warning=FALSE}
+### plotting rook contiguity based neighbors maps
+plot(mx_shp, borders = 'lightgrey') 
+plot(swm_rook, coordinates(mx_shp), pch = 19, cex = 0.6, add = TRUE, col = "red")
+title(main = "Rook Contiguity", cex.main = 0.9)
+```
+
+#### Distancia en los vecindarios cercanos
+
+Para calcular la distancia entre vecinos, extrajimos las coordenadas de cada municipio.
+
+```{r}
+### computing distance based neighbours
+coords <- coordinates(mx_shp)
+head(coords)
+```
+
+Ahora vamos a evaluar las estadisticas generales de distancias entre vecinos.
+
+```{r}
+knn1 <- knn2nb(knearneigh(coords))
+knn1_dist <- unlist(nbdists(knn1, coords, longlat = TRUE))
+summary(knn1_dist)
+
+### Based on knn_distance we can consider that the summary shows that the largest first nearest neighbour distance is 229.364 km, so using this as the upper band / threshold gives certainty that all units will have at least 1 neighbour because it’s the max distance.
+```
+
+En la parte superior hay un resumen de las distancias entre los puntos mas cercanos, utiliza la matriz de vecinos calculada en el paso anterior. La distancia mínima entre vacinos es de 0.5 km y la distancia maxima es de 229.3 km; en promedio la distancia entre municipios vecinos es de 15.8 km. La mediana de las distancias entre vecinos es de 11.4 km, lo que significa que el 50% de las distancias entre vecinos son menores o iguales a 11.4 km.
+
+```{r}
+dwm <- dnearneigh(coords, 0 ,100, longlat = TRUE)
+dwm # On average, each location is nearest in distance to another 121.6621 point areas?
+```
+
+Ahora, para obtener la lista de nearest neighbors, vamos a definir un parametro de las distancias máximas y mínimas para considerarse vecinos, en este caso vamos a especificar que son 100 km, considerando esto, se indica que esta lista contiene información sobre 2,437 regiones y 302,426 enlaces no nulos entre ellas, lo que representa un 5.09% de enlaces no nulos en relación al total de posibles enlaces. Además, se señala que en promedio cada región está conectada a 124.0977 otras regiones. Por último, se menciona que hay 5 regiones que no tienen ningún enlace y se identifican por sus números de identificación: 348, 352, 353, 355 y 2429.
+
+A continuación se observa gráficamente lo descrito.
+
+```{r warning=FALSE}
+plot(mx_shp, border = "lightgrey")
+plot(dwm, coords, add = TRUE, pch = 19, cex = 0.6)
+title(main = "Neighbours within 229 km", cex.main = 0.9)
+```
+
+## Elaborar ESDA a partir del rezago espacial de 3-5 variables. Identificar la posible presencia de autocorrelación espacial en las variables seleccionadas
+
+Para crear nuestro análisis espacial, vamos a crear una matriz Queen y un spacial lag de nuestra variable de interés.
+
+```{r}
+rswm_queen <- nb2listw(swm_queen, style = "W", zero.policy = TRUE)
+rswm_queen
+```
+
+```{r}
+### lets create a spatial lag of dataset's variable 
+mx_geodata$sp_tasa_confirmados_pob <- lag.listw(rswm_queen, mx_geodata$tasa_confirmados_pob, zero.policy=TRUE)
+# texas_geodata$sp_median_household_income
+```
+
+Aquí observamos dos gráficas de nuestra variable de interés, la tasa de confirmados de COVID-19, una con la variable en su forma original y la otra mostrando el rezago espacial:
+
+```{r}
+tasa_confirmados_pob <- qtm(mx_geodata, "tasa_confirmados_pob")
+spatial_lag_tasa_confirmados_pob <- qtm(mx_geodata, "sp_tasa_confirmados_pob")
+tmap_arrange(tasa_confirmados_pob, spatial_lag_tasa_confirmados_pob, asp = 1, ncol =2)
+```
+
+Nos es posible observar que entre más al centro del país, más aumentan los valores de desigualdad de ingreso, y, en cuanto a la inclusión financiera de la población, podemos concluir que, en general, alrededor de todo el pais los valores de inclusión están del lado más bajo:
+
+```{r}
+gini2015 <- qtm(mx_geodata, "gini2015")
+inclusion_fin_2019 <- qtm(mx_geodata, "inclusion_fin_2019")
+tmap_arrange(gini2015, inclusion_fin_2019, asp = 1, ncol =2)
+```
+
+Al analizar la tasa de hospitales en nuestro país, se observa que la mayoría de los municipios tienen una cantidad limitada de instalaciones hospitalarias, oscilando entre 0 y 40 hospitales por cada 10,000 habitantes. Este panorama evidencia la escasa infraestructura hospitalaria disponible en el territorio nacional, lo cual tiene un impacto significativo en la tasa de confirmados de COVID-19.
+
+Por otra parte, al evaluar el porcentaje de la sociedad con acceso a servicios de seguridad social, se identifica que la mayoría de los municipios se ubican en una escala que oscila entre el 60% y el 100%. Este resultado indica que la mayor parte de la población cuenta con algún tipo de protección social, lo cual es un indicador positivo:
+
+```{r}
+mx_geodata$tasa_hospitales <- (mx_geodata$No_hospitales / mx_geodata$poblacion_2022) * 10000
+tasa_hospitales <- qtm(mx_geodata, "tasa_hospitales")
+porcentaje_pob_acceso_ss <- qtm(mx_geodata, "porcentaje_pob_acceso_ss")
+tmap_arrange(tasa_hospitales, porcentaje_pob_acceso_ss, asp = 1, ncol =2)
+```
+
+En cuanto a la población con diabetes e hipertensión, vemos una distribución más uniforme alrededor de todo el pais:
+
+```{r}
+pop_hypertension <- qtm(mx_geodata, "pop_hypertension")
+pop_diabetes <- qtm(mx_geodata, "pop_diabetes")
+tmap_arrange(pop_hypertension, pop_diabetes, asp = 1, ncol =2)
+```
+
+Ahora vamos a medir la autocorrelación espacial de nuestras variables de interés para asegurar la significancia de nuestros modelos:
+
+```{r}
+### identifying and measuring spatial autocorrelation 
+
+# Moran's I Test 
+moran.test(mx_geodata$tasa_confirmados_pob, listw = rswm_queen, zero.policy = TRUE, na.action = na.omit)
+moran.test(mx_geodata$gini2015, listw = rswm_queen, zero.policy = TRUE, na.action = na.omit)
+moran.test(mx_geodata$inclusion_fin_2019, listw = rswm_queen, zero.policy = TRUE, na.action = na.omit)
+moran.test(mx_geodata$tasa_hospitales, listw = rswm_queen, zero.policy = TRUE, na.action = na.omit)
+moran.test(mx_geodata$porcentaje_pob_acceso_ss, listw = rswm_queen, zero.policy = TRUE, na.action = na.omit)
+moran.test(mx_geodata$pop_hypertension, listw = rswm_queen, zero.policy = TRUE, na.action = na.omit)
+moran.test(mx_geodata$pop_diabetes, listw = rswm_queen, zero.policy = TRUE, na.action = na.omit)
+```
+
+Podemos concluir que todas nuestras variables tienen autocorrelación espacial positiva y son estadisticamente significativas, por lo que las utilizaremos en nuestros modelos.
+
+```{r}
+# Computing Moran’s I correlogram
+Moran_Correlogram <- sp.correlogram(swm_queen, mx_geodata$tasa_confirmados_pob, order = 6, method = "I", style = "B")
+plot(Moran_Correlogram)
+```
+
+Con este correlograma, podemos observar que la autocorrelación espacial aumenta cuando la distancia entre vecinos es menor, lo que indica que los vecinos más cercanos experimentan una autocorrelación más fuerte. A medida que nos alejamos, la autocorrelación disminuye, lo que significa que la relación entre las observaciones se debilita a medida que la distancia aumenta. 
+
+## Especificar y estimar 1 modelo de regresión global (no espacial).  
+
+Construiremos un modelo lineal con variables que sabemos cuentan con significancia y ayudan a explicar el comportamiento de la tasa de confirmados en el país:
+
+```{r}
+# non- spatial regression results
+df$region <- as.factor(df$region)
+df$entidad <- as.factor(df$entidad)
+df$tasa_hospitales <- (df$No_hospitales / df$poblacion_2022) * 10000
+non_spatial_model = lm(tasa_confirmados_pob ~ gini2015 + inclusion_fin_2019 + tasa_hospitales + porcentaje_pob_acceso_ss + pop_hypertension + pop_diabetes, data = df) 
+summary(non_spatial_model)
+AIC(non_spatial_model)
+```
+
+Podemos destacar que nuestro modelo es estadisticamente significativo y según la R2 ajustada, el 37.5% de la variación en la tasa de confirmados es explicada por el comportamiento de nuestras variables predictoras. No obstante, el AIC del modelo es muy alto, lo cual tomaremos en cuenta al momento de compararlo con el AIC de los modelos que toman en cuenta el factor espacial.
+
+En cuanto a la interpretación de los resultados en el contexto estudiado:
+
+- El intercepto es de 179.6498, lo que significa que cuando todas las variables explicativas son iguales a cero, la tasa de confirmados por cada 10,000 habitantes es de aproximadamente 180.
+
+- El coeficiente para gini2015 es de 243.2598, lo que indica que un aumento de una unidad en el índice Gini (medida de la desigualdad económica de 2015) está asociado con un aumento de 243.2598 en la tasa de confirmados.
+
+- El coeficiente para inclusion_fin_2019 es de 2624.4293, lo que significa que un aumento de una unidad en el índice de inclusión financiera de 2019 (medida del acceso a los servicios financieros) está asociado con un aumento de 2624.4293 en la tasa de confirmados.
+
+- **El coeficiente para tasa_hospitales es de 1.3749, lo que indica que un aumento de una unidad en la tasa de hospitales por cada 10,000 habitantes está asociado con un aumento de 1.3749 en la tasa de confirmados.**
+
+- **El coeficiente para porcentaje_pob_acceso_ss es de -303.2435, lo que significa que un aumento de una unidad en el porcentaje de la población con acceso a servicios de salud está asociado con una disminución de 303.2435 en la tasa de confirmados.**
+
+- El coeficiente para pop_hypertension es de -1.9783, lo que indica que un aumento de una unidad en la proporción de la población con hipertensión está asociado con una disminución de 1.9783 en la tasa de confirmados. Este resultado nos resulta extraño, ya que esperaríamos que pasara lo contrario.
+
+- El coeficiente para pop_diabetes es de 4.2869, lo que significa que un aumento de una unidad en la proporción de la población con diabetes está asociado con un aumento de 4.2869 en la tasa de confirmados por cada 10,000 habitantes.
+
+## Especificar y estimar 2 modelos de regresión GWR. Considerar el uso de matrices de conectividad distintos para la especificación y estimación de cada modelo.
+
+Para construir nuestro modelo de regresión espacial, es necesario preparar los datos, lo que implica convertirlos en factores cuando sea necesario y reemplazar los valores de 0 por 0.01 para evitar errores en el código. Además, evaluaremos la normalidad de los datos y los transformaremos, ya sea mediante la aplicación de una transformación logarítmica o cuadrática, para mejorar la normalidad y obtener resultados más precisos y con menor margen de error.
+
+```{r}
+# convert to sp
+mx.sp = as(mx_shp, "Spatial")
+
+mx_geodata$region <- as.factor(mx_geodata$region)
+mx_geodata$tasa_hospitales <- (mx_geodata$No_hospitales / mx_geodata$poblacion_2022)*10000
+mx_geodata$tasa_confirmados_pob[mx_geodata$tasa_confirmados_pob == 0] <- 0.01
+mx_geodata$inclusion_fin_2019[mx_geodata$inclusion_fin_2019 == 0] <- 0.01
+mx_geodata$inclusion_fin_2019[mx_geodata$inclusion_fin_2019 == 0] <- 0.01
+summary(mx_geodata)
+```
+
+A continuación, presentamos un análisis de normalidad para cada variable y sus respectivas transformaciones, con el fin de identificar la mejor opción de transformación en cada caso:
+
+```{r}
+plot_normality(df, tasa_confirmados_pob, gini2015, inclusion_fin_2019, tasa_hospitales, porcentaje_pob_acceso_ss, pop_hypertension, pop_diabetes)
+```
+
+Con todo, construiremos dos modelos de regresión georgráfica ponderada y como criterio de selección tomaremos en cuenta el AIC:
+
+```{r}
+bw1 <- bw.gwr(log(tasa_confirmados_pob) ~ log(gini2015) + log(inclusion_fin_2019) + log(tasa_hospitales) + porcentaje_pob_acceso_ss + sqrt(pop_hypertension) + sqrt(pop_diabetes), 
+             approach = "AIC", adaptive = T, data=mx_geodata) 
+```
+
+```{r}
+# determine the kernel bandwidth
+bw2 <- bw.gwr(log(tasa_confirmados_pob) ~ log(gini2015) + log(inclusion_fin_2019) + log(tasa_hospitales) + porcentaje_pob_acceso_ss + sqrt(pop_hypertension) + sqrt(pop_diabetes), 
+              approach = "AIC", adaptive = F, data = mx_geodata) 
+```
+
+Con ambos resultados, la estimación del modelo utilizando el enfoque de banda adaptativo es el modelo con el menor AIC, por lo que utilizaremos ese modelo para el ajuste de nuestro modelo final:
+
+```{r}
+# fit the GWR model
+m.gwr <- gwr.basic(log(tasa_confirmados_pob) ~ log(gini2015) + log(inclusion_fin_2019) + log(tasa_hospitales) + porcentaje_pob_acceso_ss + sqrt(pop_hypertension) + sqrt(pop_diabetes), adaptive = T, data = mx_geodata, bw = bw1)  
+m.gwr
+```
+
+El modelo se ajustó a las 2,437 observaciones de nuestro dataset. La variable dependiente es log(tasa_confirmados_pob), que es el logaritmo natural de la tasa de confirmados por cada 10,000 habitantes. Las variables independientes son log(gini2015), log(inclusion_fin_2019), log(tasa_hospitales), porcentaje_pob_acceso_ss, sqrt(pop_hypertension) y sqrt(pop_diabetes), que representan el logaritmo de la medida de la desigualdad económica de 2015, el logaritmo del índice de inclusión financiera de 2019, el logaritmo de la tasa de hospitales por cada 10,000 habitantes, el porcentaje de la población con acceso a servicios de seguridad social, la raíz cuadrada de la proporción de población con hipertensión y la raíz cuadrada de la proporción de población con diabetes, respectivamente.
+
+Los resultados de la regresión global muestran que todas la variables independientes, excepto log(inclusion_fin_2019), son estadísticamente significativas. La R2 ajustada es de 0.2333, lo que significa que las variables independientes explican el 23% en la variación en la tasa de confirmados de COVID-19 por cada 10,000 habitantes. El AIC es igual a 8550.663.
+
+Ahora bien, también se presentan los resultados del modelo GWR. Este modelo estima un conjunto de coeficientes para cada observación, lo que permite que la relación entre las variables dependientes e independientes varíe en el espacio. El resumen de los coeficientes estimados por GWR muestra que estos varían en el espacio, y los rangos de los coeficientes difieren de los del modelo de regresión global.
+
+Para cada variable independiente, el resumen muestra el valor mínimo, primer cuartil, mediana, tercer cuartil y valor máximo de los coeficientes estimados en todas las ubicaciones geográficas. Los valores de los coeficientes estimados pueden variar en diferentes ubicaciones geográficas, como se indica por los diferentes rangos de los coeficientes estimados.
+
+Los valores de los coeficientes indican la magnitud y dirección de la relación entre la variable independiente y la variable dependiente. Un coeficiente positivo indica que un aumento en la variable independiente está asociado con un aumento en la variable dependiente, mientras que un coeficiente negativo indica que un aumento en la variable independiente está asociado con una disminución en la variable dependiente.
+
+La R2 ajustada del modelo GWR es de 0.4696911, lo que significa que las variables independientes explican el 47% en la variación en la tasa de confirmados de COVID-19 por cada 10,000 habitantes. El AIC es igual a 7530.335, que es menor al modelo global, por lo que nuestro modelo de regresión geografica ponderada es un muy buen modelo y se puede utilizar para explicar el comportamiento de los casos de COVID-19 en los municipios de México.
+
+## Considerando el criterio de AIC seleccionar el modelo de regresión que muestre un mejor desempeño
+
+El mejor modelo en este caso es el modelo de enfoque de banda adaptativo, ya que tiene el valor AIC más bajo, por lo que consideraremos este modelo para evaluar resultados y analizar el comportamiento de los datos.
+
+En este espacio se presentan los resultados de nuestro modelo en distintas ubicaciones, incluyendo información sobre la variable dependiente, las variables explicativas, los residuos, los coeficientes del modelo en cada región y las estadísticas de ajuste correspondientes:
+
+```{r}
+# Mapping GWR outputs
+gwr_sf = st_as_sf(m.gwr$SDF)
+gwr_sf
+summary(gwr_sf)
+```
+
+## Interpretar y visualizar en 5-6 mapas los principales hallazgos de los resultados obtenidos a partir del modelo de regresión seleccionado (por ejemplo, mapeo de predicción de principal variable de interés, significancia estadística de variables explicativas, R2).
+
+A continuación, presentamos un mapa que ilustra el comportamiento de la variable dependiente, que en este caso es la tasa de confirmados de COVID-19. En general, se observan grandes conglomerados de tasas de casos positivos en los municipios del centro del país, donde el número de habitantes es mayor que en las zonas periféricas. Se puede apreciar que predominan las tasas por debajo de los 200 casos por cada 10,000 habitantes, seguidas por aquellas que oscilan entre 200 y 400 casos:
+
+```{r}
+# local prediction of dependent variable  
+gwr_sf$y_predicted <- exp(gwr_sf$yhat)
+mapview(gwr_sf, zcol="y_predicted")
+```
+
+Aquí también podemos observar diversos mapas de las variables explicativas en diferentes regiones del país:
+
+```{r}
+ # local prediction of statistically significant explanatory variables 
+mapview(gwr_sf, zcol= 'log(gini2015)')
+mapview(gwr_sf, zcol= 'log(inclusion_fin_2019)')
+mapview(gwr_sf, zcol= 'log(tasa_hospitales)')
+mapview(gwr_sf, zcol= 'porcentaje_pob_acceso_ss')
+mapview(gwr_sf, zcol= 'sqrt(pop_hypertension)')
+mapview(gwr_sf, zcol= 'sqrt(pop_diabetes)')
+```
+
+También podemos observar cómo se comporta la R2 en cada municipio, dándonos cuenta que las regiones donde se ubican las entidades de Coahuila, Nuevo León, Tamaulipas, Baja California (Sur) y Ciudad de México son aquellas donde el modelo explica de mejor manera la tasa de confirmados, con valores iguales o myores al 80%:
+
+```{r}
+# local prediction of R2
+mapview(gwr_sf, zcol="Local_R2")
+```
+
+Finalmente, podemos ver la variación de la significancia de algunas variables en cada región del país:
+
+```{r}
+# visualizing more than 2 explanatory variables 
+map_1 <- tm_shape(gwr_sf) +
+  tm_polygons(col = "log(tasa_hospitales)_TV", style = "quantile", palette = "BuGn", title = "P-Value of tasa_hospitales")
+map_2 <- tm_shape(gwr_sf) +
+  tm_polygons(col = "sqrt(pop_hypertension)_TV", style = "quantile", palette = "-BuGn", title = "P-Value of op_hypertension")
+tmap_arrange(map_1, map_2, ncol = 2)
+```
+
+## A partir de los modelos de regresión seleccionados y los hallazgos identificados describir 2-3 sugerencias relacionadas con la toma de decisiones para el crecimiento / expansión territorial de organizaciones orientadas a las prestación de servicios de salud.
+
+A partir del análisis realizado anteriormente, las sugerencias para crecimiento y expansión son las siguientes:
+
+1. Se observó que la Ciudad de México, Loreto, Baja California Sur, Cuatro Ciénegas y Coahuila, y en general la zona centro del país, tienen mayor tasa de confirmados, por lo que se recomienda aumentar la cantidad de instalaciones hospitalarias principalmente en estas zonas de la república. 
+
+2. Entre más cercano al centro del país, la desigualdad de ingreso aumenta, por lo que se sugiere distribuir las instalaciones hospitalarias público y privadas de acuerdo a la desigualdad de ingreso, de manera que, entre más al centro del país, menor el rango de precio del servicio hospitalario.
+
+3. Al momento que la desigualdad económica aumenta, la tasa de confirmados también, esto se podría deber a la distribución y acceso a pruebas de COVID-19. Se recomienda distribuir las pruebas acorde a la cantidad de habitantes y dar mayor acceso gratuito a aquellos habitantes con mayor desigualdad económica.
+
+4. Se identificó que a mayor cantidad de hospitales, la tasa de confirmados también aumenta, esto debido a que la población tienen más espacios para poder realizarse pruebas  y ser atendidos, también a mayor porcentaje de población y mayor población con hipertensión, la tasa de confirmados disminuye, esto puede explicarse ya que al tener otras enfermedades, las personas suelen tomar mayores cuidados y medidas preventivas, pues existe el antecedente de complicaciones.De esta manera, se puede sugerir analizar variables de estilo de vida, cuidados y consumo de otros medicamentos como factores de menor contagio.
+
+```{r}
+### main insights are based on local results. 
+
+# table of GWR coefficients
+gwr_table = apply(m.gwr$SDF@data[, 1:7], 2, summary)
+# OLS coefficients
+non_spatial_model_table = coef(non_spatial_model)
+# joint together with a row bind
+table <- rbind(gwr_table, non_spatial_model_table)
+# add name to last row of tab
+rownames(table)[7] <- "Global"
+# transpose tab
+table <- t(round(table, 3))
+table
+```
